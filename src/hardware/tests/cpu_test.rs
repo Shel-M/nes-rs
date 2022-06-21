@@ -22,8 +22,8 @@ mod cpu_tests {
         fn assert_reg_x_value(&self, value: u8) {
             assert_eq!(
                 self.reg_x, value,
-                "cpu.reg_x did not match expected value 0x{:0>2x}",
-                self.reg_x
+                "cpu.reg_x 0x{:0>2x} did not match expected value 0x{:0>2x}",
+                self.reg_x, value
             )
         }
 
@@ -308,12 +308,34 @@ mod cpu_tests {
         use crate::hardware::cpu::StatusFlags;
 
         #[test]
-        fn test_0x10_bpl() {
-            let cpu = setup_test!(0xa9, 0x40, 0xe8, 0xe9, 0x09, 0x10, 0xfb, 0x00);
+        fn test_0x10_bpl_negative() {
+            /* Disassembly for this test
+            Address  Hexdump   Disassembly
+            -------------------------------
+            $0600    a2 f0     LDX #$f0
+            $0602    ca        DEX
+            $0603    10 fd     BPL $0602
 
-            cpu.assert_accumulator_value(0xf7);
-            cpu.assert_reg_x_value(0x08);
+             */
+            let cpu = setup_test!(0xa2, 0xf0, 0xca, 0x10, 0xfd);
+
+            cpu.assert_reg_x_value(0xef);
             cpu.assert_status_set(StatusFlags::Negative);
+        }
+
+        #[test]
+        fn test_0x10_bpl_positive() {
+            /* Disassembly for this test
+            Address  Hexdump   Disassembly
+            -------------------------------
+            $0600    a2 01     LDX #$01
+            $0602    e8        INX
+            $0603    10 fd     BPL $8002
+             */
+            let cpu = setup_test!(0xa2, 0x01, 0xe8, 0x10, 0xfd);
+
+            cpu.assert_reg_x_value(0x80);
+            cpu.assert_status_set(StatusFlags::Negative) // Should have wrapped
         }
     }
 

@@ -1,3 +1,4 @@
+use crate::hardware::bus::Bus;
 use crate::hardware::ops::Instruction::*;
 use crate::hardware::ops::Operations;
 
@@ -42,9 +43,25 @@ pub enum AddressingMode {
     NoneAddressing, // 0
 }
 
+pub trait Mem {
+    fn mem_read(&self, addr: u16) -> u8;
+
+    fn mem_write(&mut self, addr: u16, data: u8);
+
+    fn mem_read_u16(&self, addr: u16) -> u16 {
+        <u16>::from_le_bytes([self.mem_read(addr), self.mem_read(addr + 1)])
+    }
+
+    fn mem_write_u16(&mut self, addr: u16, data: u16) {
+        let data = data.to_le_bytes();
+        self.mem_write(addr, data[0]);
+        self.mem_write(addr + 1, data[1])
+    }
+}
+
 const STACK: u16 = 0x0100;
 
-#[allow(clippy::upper_case_acronyms)] // I just think cpu::CPU separates things a bit.
+#[allow(clippy::upper_case_acronyms)] // I just think cpu::CPU separates things a bit better over cpu::cpu.
 pub struct CPU {
     pub accumulator: u8,
     pub reg_x: u8,
@@ -55,9 +72,27 @@ pub struct CPU {
 
     // Make memory available to tests and debug, but not public in release.
     #[cfg(test)]
-    pub memory: [u8; 0xffff],
+    pub bus: Bus,
     #[cfg(not(test))]
-    memory: [u8; 0xffff],
+    bus: Bus,
+}
+
+impl Mem for CPU {
+    fn mem_read(&self, addr: u16) -> u8 {
+        self.bus.mem_read(addr)
+    }
+
+    fn mem_write(&mut self, addr: u16, data: u8) {
+        self.bus.mem_write(addr, data)
+    }
+
+    fn mem_read_u16(&self, addr: u16) -> u16 {
+        self.bus.mem_read_u16(addr)
+    }
+
+    fn mem_write_u16(&mut self, addr: u16, data: u16) {
+        self.bus.mem_write_u16(addr, data)
+    }
 }
 
 impl CPU {
@@ -70,26 +105,8 @@ impl CPU {
             program_counter: 0,
             stack_pointer: 0xff,
 
-            memory: [0; 0xffff],
+            bus: Bus::new(),
         }
-    }
-
-    pub fn mem_read(&self, addr: u16) -> u8 {
-        self.memory[addr as usize]
-    }
-
-    fn mem_read_u16(&self, addr: u16) -> u16 {
-        <u16>::from_le_bytes([self.mem_read(addr), self.mem_read(addr + 1)])
-    }
-
-    pub fn mem_write(&mut self, addr: u16, data: u8) {
-        self.memory[addr as usize] = data
-    }
-
-    fn mem_write_u16(&mut self, addr: u16, data: u16) {
-        let data = data.to_le_bytes();
-        self.mem_write(addr, data[0]);
-        self.mem_write(addr + 1, data[1])
     }
 
     fn stack_push(&mut self, data: u8) {
@@ -119,12 +136,15 @@ impl CPU {
     }
 
     pub fn load(&mut self, program: Vec<u8>) {
-        self.memory[0x8000..(0x8000 + program.len())].copy_from_slice(&program[..]);
-        self.program_counter = 0x8000
+        for i in 0..(program.len() as u16) {
+            self.mem_write(0x8600 + i, program[i as usize]);
+        }
+        self.mem_write_u16(0xfffc, 0x8600)
     }
 
     pub fn load_and_run(&mut self, program: Vec<u8>) {
         self.load(program);
+        self.reset();
         self.run()
     }
 
@@ -136,11 +156,9 @@ impl CPU {
     where
         F: FnMut(&mut CPU)
     {
-        let ref operations = Operations::new();
+        let operations = Operations::new();
 
         loop {
-            callback(self);
-
             let operation = &operations.ops[self.mem_read(self.program_counter) as usize];
             self.program_counter += 1;
 
@@ -196,7 +214,7 @@ impl CPU {
                 LDX => self.ldx(&operation.addr_mode),
                 LDY => self.ldy(&operation.addr_mode),
                 LSR => self.lsr(&operation.addr_mode),
-                NOP => continue,
+                NOP => {},
                 ORA => self.ora(&operation.addr_mode),
                 PHA => self.pha(),
                 PHP => self.php(),
@@ -228,7 +246,9 @@ impl CPU {
                 ),
             }
 
-            self.program_counter += (&operation.bytes - 1) as u16
+            self.program_counter += (&operation.bytes - 1) as u16;
+
+            callback(self);
         }
     }
 
@@ -256,7 +276,7 @@ impl CPU {
     // End CPU Status Interaction functions
 
     // Operation implementation
-    ///Add with Carry
+    ///Add with Carry - 0x69, 0x65, 0x75, 0x6d, 0x7d, 0x79, 0x61, 0x71
     fn adc(&mut self, addr_mode: &AddressingMode) {
         let data = self.get_data(addr_mode);
         let result =
@@ -270,12 +290,12 @@ impl CPU {
         self.set_accumulator(result as u8);
     }
 
-    /// Logical AND
+    /// Logical AND - 0x29, 0x25, 0x35, 0x2d, 0x3d, 0x39, 0x21, 0x31
     fn and(&mut self, addr_mode: &AddressingMode) {
         self.set_accumulator(self.accumulator & self.get_data(addr_mode))
     }
 
-    /// Arithmetic Shift Left
+    /// Arithmetic Shift Left - 0x0a, 0x06, 0x16, 0x0e, 0x1e
     fn asl(&mut self, addr_mode: &AddressingMode) {
         match addr_mode {
             AddressingMode::NoneAddressing => {
@@ -299,12 +319,12 @@ impl CPU {
         self.branch(!self.status_read(StatusFlags::Carry))
     }
 
-    /// Branch if Carry Set
+    /// Branch if Carry Set - 0xb0
     fn bcs(&mut self) {
         self.branch(self.status_read(StatusFlags::Carry))
     }
 
-    /// Branch if Equal
+    /// Branch if Equal - 0xf0
     fn beq(&mut self) {
         self.branch(self.status_read(StatusFlags::Zero))
     }
@@ -328,7 +348,7 @@ impl CPU {
         self.branch(!self.status_read(StatusFlags::Zero))
     }
 
-    /// Branch if Positive
+    /// Branch if Positive - 0x10
     fn bpl(&mut self) {
         self.branch(!self.status_read(StatusFlags::Negative))
     }
@@ -343,7 +363,7 @@ impl CPU {
         self.branch(self.status_read(StatusFlags::Overflow))
     }
 
-    /// Clear Carry Flag
+    /// Clear Carry Flag - 0x18
     fn clc(&mut self) {
         self.status_remove(StatusFlags::Carry)
     }
@@ -365,7 +385,7 @@ impl CPU {
         self.status_remove(StatusFlags::Overflow)
     }
 
-    /// Compare
+    /// Compare - 0xc9, 0xc5, 0xd5, 0xcd, 0xdd, 0xd9, 0xc1, 0xd1
     fn cmp(&mut self, addr_mode: &AddressingMode) {
         self.compare_register(self.accumulator, self.get_data(addr_mode))
     }
@@ -386,7 +406,7 @@ impl CPU {
         self.set_mem(addr, self.mem_read(addr) - 1);
     }
 
-    /// Decrement Register X
+    /// Decrement Register X - 0xca, 0x88
     fn dex(&mut self) {
         self.set_reg_x(self.reg_x - 1)
     }
@@ -407,7 +427,7 @@ impl CPU {
         self.set_mem(addr, self.mem_read(addr) + 1);
     }
 
-    /// Increment X
+    /// Increment X - 0xe8
     fn inx(&mut self) {
         self.set_reg_x(self.reg_x + 1);
     }
@@ -440,7 +460,7 @@ impl CPU {
         }
     }
 
-    /// Jump to Subroutine
+    /// Jump to Subroutine - 0x20
     fn jsr(&mut self) {
         let data = self.program_counter + 1; // +2 for the address the instruction points to, -1 required to replicate behavior
         self.stack_push_u16(data);
@@ -448,12 +468,12 @@ impl CPU {
         self.program_counter = self.mem_read_u16(self.program_counter)
     }
 
-    /// Load Accumulator
+    /// Load Accumulator - 0xa9, 0xa5, 0xb5, 0xad, 0xbd, 0xb9, 0xa1
     fn lda(&mut self, addr_mode: &AddressingMode) {
         self.set_accumulator(self.get_data(addr_mode))
     }
 
-    /// Load Register X
+    /// Load Register X - 0xa2, 0xa6, 0xb6, 0xae, 0xbe
     fn ldx(&mut self, addr_mode: &AddressingMode) {
         self.set_reg_x(self.get_data(addr_mode));
     }
@@ -536,14 +556,14 @@ impl CPU {
         self.status = self.stack_pull();
     }
 
-    /// Return from Subroutine
+    /// Return from Subroutine - 0x60
     fn rts(&mut self) {
         let lo = self.stack_pull();
         let hi = self.stack_pull();
         self.program_counter = <u16>::from_le_bytes([lo, hi]) + 1;
     }
 
-    /// Subtract with Carry
+    /// Subtract with Carry - 0xe9, 0xe5, 0xf5, 0xed, 0xfd, 0xf9, 0xe1, 0xf1
     fn sbc(&mut self, addr_mode: &AddressingMode) {
         let data = self.get_data(addr_mode);
 
@@ -581,7 +601,7 @@ impl CPU {
         self.status_set(StatusFlags::InterruptDisable, true);
     }
 
-    /// Store Accumulator in memory
+    /// Store Accumulator in memory - 0x85, 0x95, 0x8d, 0x9d, 0x99, 0x8a, 0x91
     fn sta(&mut self, addr_mode: &AddressingMode) {
         self.mem_write(self.get_operand_address(addr_mode), self.accumulator);
     }
@@ -611,7 +631,7 @@ impl CPU {
         self.set_reg_x(self.stack_pointer)
     }
 
-    /// Transfer X -> Accumulator
+    /// Transfer X -> Accumulator - 0x8a
     fn txa(&mut self) {
         self.set_accumulator(self.reg_x)
     }
